@@ -24,3 +24,5 @@
   let empty = IntMap.empty
   let enter t k a = IntMap.add (Key.getInt k) a t
   let look t k = IntMap.find_opt (Key.getInt k) t
+
+  let to_list = IntMap.to_list

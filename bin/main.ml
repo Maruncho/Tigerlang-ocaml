@@ -1,6 +1,3 @@
-
-open Semant
-
 (*let rec crt str = try*)
 (*  if String.starts_with ~prefix:"\\^" str*)
 (*  then*)
@@ -20,11 +17,11 @@ open Semant
 (**)
 (*let _ = print_string (escape "Hell\076o \\n \\t \\\" \\^? World\\ \n \n \t \t \r \r \\!")*)
 
-let _ =
-  try
-    let file = open_in "tests/test12.tig" in
-    let lexbuf = Lexing.from_channel file in
-    let result = Parser.main Lexer.token lexbuf in
-    Prabsyn.print stdout result
-  with Not_found ->
-    exit 0
+let _ = try
+  let file = open_in "tests/mytest.tig" in
+  let lexbuf = Lexing.from_channel file in
+  let result = Parser.main Lexer.token lexbuf in
+  let _ = Semant.transProg result in ()
+  (*Prabsyn.print stdout result*)
+with
+  Parser.Error -> print_string "There is an syntactical error. Too lazy to learn menhir error-handling.\n"

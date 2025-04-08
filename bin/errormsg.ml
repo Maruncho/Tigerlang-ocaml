@@ -15,16 +15,16 @@
   let error pos (msg:string) =
     let rec look lst n = (match lst with
 	| a :: rest ->
-	  if a < pos then print_string (":" ^
+	  if a < pos then print_string ("line:" ^
 			 string_of_int n ^
-			 "." ^
+			 " smth:" ^
 			 string_of_int (pos-a))
 		 else look rest (n-1) 
 	| _ -> print_string "0.0")
     in anyErrors := true;
 	print_string (!fileName);
 	look !linePos !lineNum;
-	print_string ":";
+	print_string " : ";
 	print_string msg;
 	print_string "\n"
 

@@ -1,9 +1,13 @@
 %{
     open struct module A = Absyn end
+    open struct module S = Symbol end
 
     type varType = 
         | Field of Symbol.symbol * int
         | Subscript of A.expr * int
+
+    (*let to_simpleVar sym =*)
+    (*    A.*)
 
     let handle_lvalue init_var l_rest = List.fold_left
         (fun acc el -> begin match el with
@@ -56,29 +60,29 @@ main:
 ;
 
 expr:
-  | lvalue            { A.VarExp $1 }
-  | NIL               { A.NilExp }
-  | LPAREN RPAREN     { A.SeqExp ([], $1) } (* no value (unit) *)
+  | lvalue             { A.VarExp $1 }
+  | NIL                { A.NilExp }
+  | LPAREN RPAREN      { A.SeqExp ([], $1) } (* no value (unit) *)
   | LPAREN expr RPAREN { A.SeqExp ([$2], $1) } (* grouping *)
-  | LPAREN seq RPAREN { A.SeqExp ($2, $1) }
-  | INT               { A.IntExp $1 }
-  | STRING            { A.StringExp ((fst $1), (snd $1))} (*had an error for some reason*)
-  | arith             { $1 }
-  | compare           { $1 }
-  | bool              { $1 }
-  | new_record        { $1 }
-  | new_array         { $1 }
-  | conditional       { $1 }
-  | valueless         { $1 }
-  | call              { $1 }
-  | let_exp           { $1 }
+  | LPAREN seq RPAREN  { A.SeqExp ($2, $1) }
+  | INT                { A.IntExp $1 }
+  | STRING             { A.StringExp ((fst $1), (snd $1))} (*had an error for some reason*)
+  | arith              { $1 }
+  | compare            { $1 }
+  | bool               { $1 }
+  | new_record         { $1 }
+  | new_array          { $1 }
+  | conditional        { $1 }
+  | valueless          { $1 }
+  | call               { $1 }
+  | let_exp            { $1 }
 ;
 
 lvalue:
-    ID lvalue_rest { handle_lvalue (A.SimpleVar($1, (snd $1))) $2 }
+    ID lvalue_rest { handle_lvalue (A.SimpleVar((S.symbol (fst $1)), (snd $1))) $2 }
 ;
 lvalue_rest:
-    DOT ID lvalue_rest                 { (Field ($2, (snd $2))) :: $3 }
+    DOT ID lvalue_rest                 { (Field ((S.symbol (fst $2)), (snd $2))) :: $3 }
   | LBRACKET expr RBRACKET lvalue_rest { (Subscript ($2, $1)) :: $4 }
   |                                    { [] }
 ;
@@ -88,7 +92,7 @@ seq:
 ;
 expseq:
     expr                   { [$1] }
-  | expr SEMICOLON expseq { [$1] @ $3 }
+  | expr SEMICOLON expseq  { [$1] @ $3 }
 ;
 
 arith:
@@ -112,14 +116,14 @@ bool:
 ;
 
 new_record:
-    ID LBRACE separated_list(COMMA, rec_field) RBRACE {A.RecordExp{fields=$3;typ=$1;pos=$2}}
+    ID LBRACE separated_list(COMMA, rec_field) RBRACE {A.RecordExp{fields=$3;typ=(S.symbol (fst $1));pos=$2}}
 ;
 rec_field:
-    ID EQ expr { ($1, $3, $2) }
+    ID EQ expr { ((S.symbol (fst $1)), $3, $2) }
 ;
 
 new_array:
-    ID LBRACKET expr RBRACKET OF expr {A.ArrayExp {typ = $1; size = $3; init = $6; pos = $2}}
+    ID LBRACKET expr RBRACKET OF expr {A.ArrayExp {typ = (S.symbol (fst $1)); size = $3; init = $6; pos = $2}}
 ;
 
 conditional:
@@ -130,12 +134,12 @@ conditional:
 valueless:
   | lvalue ASSIGN expr                 {A.AssignExp {var = $1; expr = $3; pos = $2}}
   | WHILE expr DO expr                 {A.WhileExp {test = $2; body = $4; pos = $1}}
-  | FOR ID ASSIGN expr TO expr DO expr {A.ForExp{var=$2;lo=$4;hi=$6;body=$8;pos=$1;escape=ref true}}
+  | FOR ID ASSIGN expr TO expr DO expr {A.ForExp{var=(S.symbol (fst $2));lo=$4;hi=$6;body=$8;pos=$1;escape=ref true}}
   | BREAK                              {A.BreakExp $1}
 ;
 
 call:
-    ID LPAREN separated_list(COMMA, expr) RPAREN {A.CallExp {func = $1; args = $3; pos = $2}}
+    ID LPAREN separated_list(COMMA, expr) RPAREN {A.CallExp {func = (S.symbol (fst $1)); args = $3; pos = $2}}
 ;
 
 let_exp:
@@ -159,13 +163,13 @@ tydecs:
   | tydecs tydec { $1 @ [$2] }
 ;
 tydec:
-    TYPE ID EQ ty { let r : A.typeDecRecord = {name = $2; ty = $4; pos = $1} in r }
+    TYPE ID EQ ty { let r : A.typeDecRecord = {name = (S.symbol (fst $2)); ty = $4; pos = $1} in r }
 ;
 
 ty:
-    ID                      { A.NameTy($1, (snd $1)) }
+    ID                      { A.NameTy((S.symbol (fst $1)), (snd $1)) }
   | LBRACE tyfields RBRACE  { A.RecordTy $2 }
-  | ARRAY OF ID             { A.ArrayTy($3, $1) }
+  | ARRAY OF ID             { A.ArrayTy((S.symbol (fst $3)), $1) }
 ;
 
 tyfields:
@@ -174,14 +178,14 @@ tyfields:
 ;
 tyfields_seq:
     ID COLON ID COMMA tyfields_seq
-            { let r : A.field = {name = $1; typ = $3; pos = $2; escape = ref true} in [r] @ $5 }
+            { let r : A.field = {name = (S.symbol (fst $1)); typ = (S.symbol (fst $3)); pos = $2; escape = ref true} in [r] @ $5 }
   | ID COLON ID
-            { let r : A.field = {name = $1; typ = $3; pos = $2; escape = ref true} in [r] }
+            { let r : A.field = {name = (S.symbol (fst $1)); typ = (S.symbol (fst $3)); pos = $2; escape = ref true} in [r] }
 ;
 
 vardec:
-    VAR ID ASSIGN expr          {A.VarDec{name=$2;typ=None;init=$4;pos=$1;escape=ref true}}
-  | VAR ID COLON ID ASSIGN expr {A.VarDec{name=$2;typ=Some($4,$3);init=$6;pos=$1;escape=ref true}}
+    VAR ID ASSIGN expr          {A.VarDec{name=(S.symbol (fst $2));typ=None;init=$4;pos=$1;escape=ref true}}
+  | VAR ID COLON ID ASSIGN expr {A.VarDec{name=(S.symbol (fst $2));typ=Some((S.symbol (fst $4)),$3);init=$6;pos=$1;escape=ref true}}
 ;
 
 fundecs: fundec { [$1] }
@@ -189,7 +193,7 @@ fundecs: fundec { [$1] }
 ;
 fundec:
     FUNCTION ID LPAREN tyfields RPAREN EQ expr {let r : A.fundec =
-        {name = $2; params = $4; result = None; body = $7; pos = $1} in r}
+        {name = (S.symbol (fst $2)); params = $4; result = None; body = $7; pos = $1} in r}
   | FUNCTION ID LPAREN tyfields RPAREN COLON ID EQ expr {let r : A.fundec =
-        {name = $2; params = $4; result = Some ($7, $6); body = $9; pos = $1} in r}
+        {name = (S.symbol (fst $2)); params = $4; result = Some ((S.symbol (fst $7)), $6); body = $9; pos = $1} in r}
 ;

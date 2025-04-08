@@ -2,7 +2,7 @@
  (public_name appel)
  (name main)
  ; (modules_without_implementation env)
- (libraries appel str))
+ (libraries appel str menhirLib))
 
 (ocamllex lexer)
 (menhir
