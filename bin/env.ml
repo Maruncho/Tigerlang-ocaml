@@ -1,9 +1,9 @@
 
-type access = int
+type access = Translate.access
 type ty = Types.ty
 
-type enventry = VarEntry of {ty: ty; immutable: bool}
-              | FunEntry of {formals: ty list; result: ty}
+type enventry = VarEntry of {access: Translate.access; ty: ty; immutable: bool}
+              | FunEntry of {level: Translate.level; label: Temp.label; formals: ty list; result: ty}
 
 let base_tenv : ty Symbol.table = Symbol.empty (* predefined types *)
 let base_tenv = Symbol.enter base_tenv (Symbol.symbol "int") Types.INT

@@ -1,8 +1,7 @@
 (executable
  (public_name appel)
  (name main)
- ; (modules_without_implementation env)
- (libraries appel str menhirLib))
+ (libraries str menhirLib))
 
 (ocamllex lexer)
 (menhir

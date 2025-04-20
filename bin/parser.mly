@@ -193,7 +193,7 @@ fundecs: fundec { [$1] }
 ;
 fundec:
     FUNCTION ID LPAREN tyfields RPAREN EQ expr {let r : A.fundec =
-        {name = (S.symbol (fst $2)); params = $4; result = None; body = $7; pos = $1} in r}
+        {name = (S.symbol (fst $2)); params = $4; result = None; body = $7; static_link = ref false; pos = $1} in r}
   | FUNCTION ID LPAREN tyfields RPAREN COLON ID EQ expr {let r : A.fundec =
-        {name = (S.symbol (fst $2)); params = $4; result = Some ((S.symbol (fst $7)), $6); body = $9; pos = $1} in r}
+        {name = (S.symbol (fst $2)); params = $4; result = Some ((S.symbol (fst $7)), $6); body = $9; static_link = ref false; pos = $1} in r}
 ;

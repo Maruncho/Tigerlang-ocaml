@@ -1,22 +1,19 @@
 
 module A = Absyn
 
-module Translate = struct type exp = unit end
 
 type venv = Env.enventry Symbol.table
 type tenv = Types.ty Symbol.table
 
-type expty = {exp: Translate.exp; ty: Types.ty}
+type expty = {exp: unit; ty: Types.ty}
 
 let placeholder_unique = ref ()
 let placeholder_rec = Types.RECORD ([], "", placeholder_unique)
 
-module TypeDec = struct
-    type t = A.typeDecRecord
-    let compare (e1:A.typeDecRecord) (e2:A.typeDecRecord) = String.compare (Symbol.name (e1.name)) (Symbol.name (e2.name))
-end
-
-module Set_TypeDec = Set.Make
+let rec list3split = function
+    | [] -> ([],[],[])
+    | (x,y,z) :: t -> let (xt, yt, zt) = list3split t in
+                      (x::xt, y::yt, z::zt)
 
 let rec pop_in_list f = function
     | [] -> (None, [])
@@ -47,9 +44,9 @@ let rec string_of_type ?(verbose=false) ?(show_recursive=false) typ = match typ 
 
 let string_of_envtype = function
     | Env.VarEntry {ty;_} -> "var of " ^ (string_of_type ty)
-        | Env.FunEntry {formals; result} -> "fun of" ^ (List.fold_left (fun acc x -> acc ^ " " ^ (string_of_type x))
+    | Env.FunEntry {formals;result;level;_} -> "fun of" ^ (List.fold_left (fun acc x -> acc ^ " " ^ (string_of_type x))
                                                         "" formals)
-                                                      ^ " -> " ^ (string_of_type result)
+                                                      ^ " -> " ^ (string_of_type result) ^ ( if (Translate.requiresStaticLink level) then " (has sl)" else "")
 
 let print_tenv ?(verbose=false) tenv =
     print_string "############# TENV ################\n";
@@ -120,7 +117,7 @@ let compare_types expected actual_expty pos buildMessage (index:string) =
 
 let rec convert_fields tenv ?(is_params=false) ?(seen=[]) (fields:A.field list) = match fields with
     | [] -> []
-    | {name; typ; pos; _} :: t ->
+    | {name; typ; pos; escape; _} :: t ->
         let str = Symbol.name name in
         let exists = List.exists (fun x -> x = str) seen in
         let _ = if exists then Errormsg.error pos ("duplicate " ^ if is_params then "parameter" else "field" ^ " \"" ^ str ^ "\"") in
@@ -131,9 +128,9 @@ let rec convert_fields tenv ?(is_params=false) ?(seen=[]) (fields:A.field list) 
         in
         if exists
         then convert_fields tenv ~is_params:is_params ~seen:seen t
-        else (name, ty) :: convert_fields tenv ~is_params:is_params ~seen:(str::seen) t
+        else (name, ty, !escape) :: convert_fields tenv ~is_params:is_params ~seen:(str::seen) t
 
-and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : expty =
+and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp (l:Translate.level) : expty =
     let rec checkFields expected actual record_pos = match expected with
         | (e_sym, e_typ) :: rest -> begin
             match actual with
@@ -167,7 +164,7 @@ and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : exp
             else begin match Option.get found_opt with
                 | Env.FunEntry _ -> let _ = Errormsg.error pos ("first order functions not allowed") in
                     {exp = (); ty = Types.UNDEFINED}
-                | Env.VarEntry {ty;immutable} -> let _ = if must_be_mutable && immutable
+                | Env.VarEntry {ty;immutable;_} -> let _ = if must_be_mutable && immutable
                                                          then Errormsg.error pos ("variable " ^ (Symbol.name sym) ^ " is immutable")
                                                  in {exp = (); ty = ty}
             end
@@ -206,7 +203,7 @@ and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : exp
             else match Option.get sym_opt with
                 | Env.VarEntry _ -> let _ = Errormsg.error pos ("\"" ^ (Symbol.name func) ^ "\" is not a function/procedure") in
                     {exp = (); ty = Types.UNDEFINED}
-                | Env.FunEntry {formals; result} ->
+                | Env.FunEntry {formals; result; _} ->
                 let len_params = List.length formals in
                 let len_args = List.length args in
                 let typ = match result with Types.UNIT -> "procedure" | _ -> "function" in
@@ -234,7 +231,7 @@ and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : exp
                         let _ = Errormsg.error pos "integer or string required" in {exp = (); ty = Types.INT}
                 | A.EqOp | A.NeqOp
                     -> let (l, r) = (trExp left), (trExp right) in
-                        match l.ty with
+                        match actual_ty l.ty with
                           | Types.UNDEFINED -> (*It has its own error message*) {exp = (); ty = Types.INT}
                           | Types.INT -> let _ = checkInt r pos in {exp = (); ty = Types.INT}
                           | Types.STRING -> let _ = checkString r pos in {exp = (); ty = Types.INT}
@@ -247,7 +244,7 @@ and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : exp
             let sym_opt = Symbol.look tenv typ in if sym_opt = None then
                 let _ = Errormsg.error pos ("record type \"" ^ (Symbol.name typ) ^ "\" is not declared in this scope") in
                 {exp = (); ty = Types.UNDEFINED}
-            else let record = Option.get sym_opt in match record with
+            else let record = Option.get sym_opt in match actual_ty record with
                 | Types.RECORD (the_fields, _, _) -> let _ = checkFields the_fields fields pos in
                         {exp = (); ty = record}
                 | _ -> let _ = Errormsg.error pos ("\"" ^ (Symbol.name typ) ^ "\" is not a record type") in
@@ -276,18 +273,28 @@ and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : exp
             let _ = checkInt (trExp test) pos ~message:"test condition must be an integer" in
             let _ = checkUnit (trExp ~breakable:true body) pos ~message:"body must be a valueless expression" in
             {exp = (); ty = Types.UNIT}
-        | A.ForExp {var; lo; hi; body; pos; _} -> 
+        | A.ForExp {var; escape; lo; hi; body; pos;} -> 
             let _ = checkInt (trExp lo) pos ~message:"lower bound must be an integer" in
             let _ = checkInt (trExp hi) pos ~message:"upper bound must be an integer" in
-            let _ = checkUnit (transExp ~breakable:true (Symbol.enter venv var (Env.VarEntry {ty = Types.INT; immutable = true})) tenv body)
-                              pos ~message:"body must be a valueless expression" in
+
+            let data:Translate.data_formal = {escape = !escape; elementary = true} in
+            let _ = checkUnit
+                        (transExp
+                            ~breakable:true
+                            (Symbol.enter venv var
+                                (Env.VarEntry {ty = Types.INT;
+                                               immutable = true;
+                                               access = (Translate.allocLocal l data)}))
+                            tenv body l)
+                        pos
+                        ~message:"body must be a valueless expression" in
             {exp = (); ty = Types.UNIT}
         | A.BreakExp pos -> let _ = if not breakable then Errormsg.error pos "\"break\" is illegal here" in
                             {exp = (); ty = Types.UNIT}
-        | A.LetExp {decs; body; _} -> let (venv', tenv') = transDecs venv tenv decs in
+        | A.LetExp {decs; body; _} -> let (venv', tenv') = transDecs venv tenv decs l in
             (*let _ = print_tenv ~verbose:true tenv' in*)
             (*let _ = print_venv venv' in*)
-            transExp ~breakable:breakable venv' tenv' body
+            transExp ~breakable:breakable venv' tenv' body l
         | A.ArrayExp {typ; size; init; pos} -> begin
             let sym_opt = Symbol.look tenv typ in if sym_opt = None then
                 let _ = Errormsg.error pos ("array type \"" ^ (Symbol.name typ) ^ "\" is not declared in this scope") in
@@ -304,25 +311,28 @@ and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp : exp
 
     in trExp ~breakable:breakable exp 
 
-and transDecs venv tenv decs = match decs with
+and transDecs venv tenv decs (l:Translate.level) = match decs with
     | [] -> (venv, tenv)
     (*A VarDec can overwrite a previous VarDec with the same name*)
-    | A.VarDec {name; typ; init; pos; _} :: t ->
-        let init_expty = (transExp venv tenv init) in
+    | A.VarDec {name; escape; typ; init; pos; _} :: t ->
+        let init_expty = (transExp venv tenv init l) in
         let {ty = init_ty;_} = init_expty in
         begin match typ with
         | None -> if init_ty = Types.NIL
                 then let _ = Errormsg.error pos "\"nil\" initiliazer requires declaration with explicit record type" in
-                     transDecs (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false})) tenv t
+                    transDecs (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false; access = Translate.dummy_access})) tenv t l
                 else
-                    transDecs (Symbol.enter venv name (Env.VarEntry {ty = init_ty; immutable = false})) tenv t
+                    let data:Translate.data_formal = {escape= !escape; elementary=Types.is_elementary init_ty} in
+                    transDecs (Symbol.enter venv name
+                            (Env.VarEntry {ty=init_ty; immutable=false; access=Translate.allocLocal l data})) tenv t l
         | Some (sym, sym_pos) -> begin match Symbol.look tenv sym with
             | None -> let _ = Errormsg.error sym_pos ("type \"" ^ (Symbol.name sym) ^ "\" is not declared in this scope") in
-                      transDecs (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false})) tenv t
+                    transDecs (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false; access = Translate.dummy_access})) tenv t l
             | Some actual_type -> 
                 let buildMessage _ expected received = "initializer type must be " ^ expected ^ ", but received " ^ received in
                 let _ = compare_types actual_type init_expty sym_pos buildMessage "" in
-                transDecs (Symbol.enter venv name (Env.VarEntry {ty = actual_type; immutable = false})) tenv t
+                let data:Translate.data_formal = {escape= !escape; elementary=Types.is_elementary actual_type} in
+                transDecs (Symbol.enter venv name (Env.VarEntry {ty=actual_type; immutable=false; access=Translate.allocLocal l data})) tenv t l
             end
         end
     | (A.FunctionDec lst) :: t ->
@@ -337,41 +347,49 @@ and transDecs venv tenv decs = match decs with
 
         in let rec scan_headers ?(venv=venv) ?(data=[]) (fundecs:A.fundec list) = match fundecs with
             | [] -> (venv, (List.rev data))
-            | {name;result;params;_} :: t ->
+            | {name;result;params;static_link;_} :: t ->
                 let params = convert_fields tenv ~is_params:true params
-                in let (_, params_ty) = List.split params
+                in let (_, params_ty, params_esc) = list3split params
                 in let ty = begin match result with
-                | None -> Types.UNIT
-                | Some (sym, sym_pos) -> begin match Symbol.look tenv sym with
-                    | None ->
-                        let _ = Errormsg.error sym_pos ("type \"" ^ (Symbol.name sym) ^ "\" is not declared in this scope") in
-                                Types.UNDEFINED
-                    | Some ty -> ty
+                    | None -> Types.UNIT
+                    | Some (sym, sym_pos) -> begin match Symbol.look tenv sym with
+                        | None ->
+                            let _ = Errormsg.error sym_pos ("type \"" ^ (Symbol.name sym) ^ "\" is not declared in this scope") in
+                                    Types.UNDEFINED
+                        | Some ty -> ty
+                        end
                     end
-                end in scan_headers
+                in let arg_data = List.map (fun (ty, esc) -> ({escape=esc;elementary=Types.is_elementary ty}:Translate.data_formal))
+                                                        (List.combine params_ty params_esc)
+                in let label = Temp.newLabel()
+                in let args:Translate.newLevelArgs = {parent=l;name=label;
+                                                      needs_static_link= !static_link;formals=arg_data}
+                in let level = Translate.newLevel args in
+                scan_headers
                     ~venv:(Symbol.enter venv name
-                            (Env.FunEntry {formals = params_ty; result = ty}))
-                    ~data:((params,ty)::data)
+                        (Env.FunEntry {formals=params_ty;result=ty;level=level;label=label}))
+                    ~data:((params,ty,level)::data)
                     t
 
         in let lst = filter_duplicates lst
-        in let (new_venv, data) = scan_headers lst (*we assume params is in order*)
+        in let (new_venv, data) = scan_headers lst (*we assume data is in the same order*)
 
         in let rec scan_bodies (fundecs:A.fundec list) data = match fundecs with
             | [] -> ()
             | {body;pos;_} :: t ->
-                let (params, result) = (List.hd data) in
+                let (params, result, new_level) = (List.hd data) in
                 let in_venv = List.fold_left
-                    (fun acc_venv param -> Symbol.enter acc_venv
-                                            (fst param)
-                                            (Env.VarEntry {ty=(snd param); immutable = false}))
+                    (fun acc_venv ((sym, ty, _), access) ->
+                        Symbol.enter acc_venv sym
+                                    (Env.VarEntry {ty=ty; immutable = false; access = access}))
                     new_venv
-                    params
+                    (* big assumption everything is in the right order! :) *)
+                    (List.combine params (Translate.formals new_level))
                 in let buildMessage _ expected received = "body must be " ^ expected ^ ", but received " ^ received
-                in compare_types result (transExp in_venv tenv body) pos buildMessage "";
+                in compare_types result (transExp in_venv tenv body new_level) pos buildMessage "";
                    scan_bodies t (List.tl data)
 
-        in let _ = scan_bodies lst data in transDecs new_venv tenv t
+        in let _ = scan_bodies lst data in transDecs new_venv tenv t l
 
     | (A.TypeDec lst) :: t ->
         let rec filter_duplicates ?(seen=[]) lst = match lst with
@@ -523,7 +541,7 @@ and transDecs venv tenv decs = match decs with
 
         (* actual resolving finally*)
         in let final_tenv = resolveEverything tweaked_tenv lst
-        in transDecs venv final_tenv t
+        in transDecs venv final_tenv t l
 
 and transTy ?(type_name="The developer forgor something") tenv ty  = match ty with
     | A.NameTy (sym, pos) -> begin match Symbol.look tenv sym with
@@ -532,11 +550,13 @@ and transTy ?(type_name="The developer forgor something") tenv ty  = match ty wi
         | Some ty -> ty
     end
     | A.RecordTy fields ->
-        Types.RECORD ((convert_fields tenv fields), type_name, ref ())
+        Types.RECORD ((List.map (fun (f,s,_) -> (f,s)) (convert_fields tenv fields)), type_name, ref ())
     | A.ArrayTy (sym, pos) -> begin match Symbol.look tenv sym with
         | None -> let _ = Errormsg.error pos ("type \"" ^ (Symbol.name sym) ^ "\" is not declared in this scope") in
                   Types.UNDEFINED
         | Some ty -> Types.ARRAY (ty, type_name, ref ())
     end
 
-let transProg expr = transExp Env.base_venv Env.base_tenv expr
+let transProg expr = 
+    let () = FindEscape.findEscape expr in
+    (transExp Env.base_venv Env.base_tenv expr (Translate.outermost))

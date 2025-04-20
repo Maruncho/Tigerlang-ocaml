@@ -1,0 +1,6 @@
+(lang dune 3.2)
+(context
+ (default
+  (env
+   (_
+    (env-vars (machine x86))))))

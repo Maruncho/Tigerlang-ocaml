@@ -10,3 +10,9 @@ type ty = INT
         | UNIT (*Doesn't have literal, but it is a type.*)
         | NAME of Symbol.symbol * ty option ref (*intermediate representation, in impl details. More complicated than it should be, but it ain't that bad; I didn't quite follow the book's idea, but kept it as is anyway*)
         | UNDEFINED (*A 'native' 'anti-' type. Doesn't have a literal, it's not a real type.*)
+
+let is_elementary = function
+    | NAME (_,_) -> failwith "NAME in the wild."
+    | UNDEFINED -> failwith "UNDEFINED in the wild."
+    | INT -> true
+    | _ -> false

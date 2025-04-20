@@ -25,7 +25,8 @@ and expr =
         | LetExp of {decs: dec list; body: expr; pos: pos}
         | ArrayExp of {typ: symbol; size: expr; init: expr; pos: pos}
 
-and fundec = {name: symbol; params: field list; result: (symbol * pos) option; body: expr; pos: pos}
+and fundec = {name: symbol; params: field list; result: (symbol * pos) option;
+              body: expr; static_link: bool ref; pos: pos}
 
 and ty  = NameTy of symbol * pos
         | RecordTy of field list
