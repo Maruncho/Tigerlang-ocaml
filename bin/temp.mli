@@ -1,6 +1,6 @@
 
 type temp
-val newTemp : unit -> temp
+val newTemp : ?name:(string option) -> unit -> temp
 (*module type Table = Map.S with type key = temp*)
 val makeString : temp -> string
 

@@ -18,10 +18,10 @@
 (*let _ = print_string (escape "Hell\076o \\n \\t \\\" \\^? World\\ \n \n \t \t \r \r \\!")*)
 
 let _ = try
-  let file = open_in "tests/mytest.tig" in
+  let file = open_in "tests/test42.tig" in
   let lexbuf = Lexing.from_channel file in
   let result = Parser.main Lexer.token lexbuf in
-  let _ = Semant.transProg result in ()
-  (*Prabsyn.print stdout result*)
+  let {exp;_}:Semant.expty = Semant.transProg result in
+  PrintTree.printTree stdout (Translate.unNx exp)
 with
   Parser.Error -> print_string "There is an syntactical error. Too lazy to learn menhir error-handling.\n"

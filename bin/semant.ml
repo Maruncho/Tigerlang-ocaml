@@ -5,15 +5,22 @@ module A = Absyn
 type venv = Env.enventry Symbol.table
 type tenv = Types.ty Symbol.table
 
-type expty = {exp: unit; ty: Types.ty}
+type expty = {exp: Translate.exp; ty: Types.ty}
 
 let placeholder_unique = ref ()
 let placeholder_rec = Types.RECORD ([], "", placeholder_unique)
+
+let not_breakable = Temp.newLabel()
 
 let rec list3split = function
     | [] -> ([],[],[])
     | (x,y,z) :: t -> let (xt, yt, zt) = list3split t in
                       (x::xt, y::yt, z::zt)
+
+let rec find_with_index_opt ?(i=0) pred = function
+    | [] -> None
+    | h :: t -> if (pred h) then Some (h, i)
+                            else find_with_index_opt ~i:(i+1) pred t
 
 let rec pop_in_list f = function
     | [] -> (None, [])
@@ -130,209 +137,243 @@ let rec convert_fields tenv ?(is_params=false) ?(seen=[]) (fields:A.field list) 
         then convert_fields tenv ~is_params:is_params ~seen:seen t
         else (name, ty, !escape) :: convert_fields tenv ~is_params:is_params ~seen:(str::seen) t
 
-and transExp ?(breakable=false) (venv: Env.enventry Symbol.table) tenv exp (l:Translate.level) : expty =
-    let rec checkFields expected actual record_pos = match expected with
+and transExp (breakable:Temp.label) (venv: Env.enventry Symbol.table) tenv exp (l:Translate.level) : expty =
+    let rec checkAndOrderFields expected actual record_pos = match expected with
         | (e_sym, e_typ) :: rest -> begin
             match actual with
-            | [] -> List.iter (fun (sym, typ) -> Errormsg.error record_pos ("field \"" ^
+            | [] -> let () = List.iter (fun (sym, typ) -> Errormsg.error record_pos ("field \"" ^
                                              (Symbol.name sym) ^ "\" of type \"" ^
                                              (string_of_type typ) ^ "\" is missing"))
-                              expected
+                             expected in []
             | _ -> let (matches, remain) = List.partition (fun (sym, _, _) -> (Symbol.name sym) = (Symbol.name e_sym)) actual
                    in begin match matches with
-                        | [] -> Errormsg.error record_pos ("field \"" ^
+                        | [] -> let () = Errormsg.error record_pos ("field \"" ^
                                  (Symbol.name e_sym) ^ "\" of type \"" ^
                                  (string_of_type e_typ) ^ "\" is missing")
-                        | [(_, expr, pos)] -> let check = (trExp expr) in
+                                (*fill empty space so that the list == expected fields size*)
+                                in checkAndOrderFields rest remain record_pos
+                        | (_, expr, pos) :: matches_rest -> let check = (trExp breakable expr) in
                             let buildMessage field expected received = "field \"" ^ field ^ "\" must be " ^ expected ^ ", but received " ^ received in
                             compare_types e_typ check pos buildMessage (Symbol.name e_sym);
-                            checkFields rest remain record_pos
-
-                        | _ -> Errormsg.error record_pos ("duplicate field \"" ^ (Symbol.name e_sym) ^ "\"")
+                            let () = if matches_rest <> [] then (Errormsg.error record_pos ("duplicate field \"" ^ (Symbol.name e_sym) ^ "\"")) in
+                            check :: checkAndOrderFields rest remain record_pos
                    end
         end
-        | [] -> List.iter (fun (sym, _, pos) -> Errormsg.error pos
+        | [] -> let () = List.iter (fun (sym, _, pos) -> Errormsg.error pos
                                                 ("record definition does not contain field \"" ^
                                                 (Symbol.name sym) ^ "\" and so it must be removed"))
-                          actual
+                         actual in []
 
     and transVar ?(must_be_mutable=false) var : expty = match var with
         | A.SimpleVar (sym, pos) ->
             let found_opt = Symbol.look venv sym in if found_opt = None then
                 let _ = Errormsg.error pos ("variable \"" ^ (Symbol.name sym) ^ "\" is not declared in this scope") in
-                {exp = (); ty = Types.UNDEFINED}
+                {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
             else begin match Option.get found_opt with
                 | Env.FunEntry _ -> let _ = Errormsg.error pos ("first order functions not allowed") in
-                    {exp = (); ty = Types.UNDEFINED}
-                | Env.VarEntry {ty;immutable;_} -> let _ = if must_be_mutable && immutable
+                    {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
+                | Env.VarEntry {access;ty;immutable;} -> let _ = if must_be_mutable && immutable
                                                          then Errormsg.error pos ("variable " ^ (Symbol.name sym) ^ " is immutable")
-                                                 in {exp = (); ty = ty}
+                                                         in {exp = Translate.simpleVar access l ; ty = ty}
             end
 
         | A.FieldVar (var, sym, pos) ->
-            let {ty = var_ty; _} = transVar var in begin match var_ty with
+            let {exp = var_exp; ty = var_ty} = transVar var in begin match var_ty with
                 | Types.RECORD (fields, name, _) ->
-                    let found = List.find_opt (fun (sym', _) -> (Symbol.name sym) = (Symbol.name sym'))
-                                              fields
+                    let found = find_with_index_opt (fun (sym', _) -> (Symbol.name sym) = (Symbol.name sym'))
+                                                             fields
                     in begin match found with
                         | None -> let _ = Errormsg.error pos ("Record type \"" ^ name ^ "\" does not contain field \"" ^ (Symbol.name sym) ^ "\"") in
-                                  {exp = (); ty = Types.UNDEFINED}
-                        | Some (_, ty) -> {exp = (); ty = ty}
+                                {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
+                        | Some ((_, ty), index) -> {exp = (Translate.fieldVar (var_exp) index) ; ty = ty}
                     end
                 | _ -> let _ = Errormsg.error pos "dot operator must be used on a record type" in
-                       {exp = (); ty = Types.UNDEFINED}
-            end
-        | A.SubscriptVar (var, expr, pos) ->
-            let {ty = var_ty; _} = transVar var in begin match var_ty with
-                | Types.ARRAY (elem_ty, _, _) ->
-                    let _ = checkInt (trExp expr) pos ~message:"subscript expression must be an integer" in
-                    {exp = (); ty = elem_ty}
-                | _ -> let _ = Errormsg.error pos "subscript operator must be used on an array type" in
-                       {exp = (); ty = Types.UNDEFINED}
+                       {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
             end
 
-    and trExp ?(breakable=false) expr : expty = match expr with
+        | A.SubscriptVar (var, expr, pos) ->
+            let {exp = var_exp; ty = var_ty} = transVar var in begin match var_ty with
+                | Types.ARRAY (elem_ty, _, _) ->
+                    let intExpr = trExp breakable expr in
+                    let _ = checkInt intExpr pos ~message:"subscript expression must be an integer" in
+                    {exp = (Translate.subscriptVar (var_exp) (intExpr.exp)); ty = elem_ty}
+                | _ -> let _ = Errormsg.error pos "subscript operator must be used on an array type" in
+                       {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
+            end
+
+    and trExp (breakable:Temp.label) expr : expty = match expr with
         | A.VarExp var -> transVar var
-        | A.NilExp -> {exp = (); ty = Types.NIL}
-        | A.IntExp _ -> {exp = (); ty = Types.INT}
-        | A.StringExp _ -> {exp = (); ty = Types.STRING}
+        | A.NilExp -> {exp = (Translate.nilExp()); ty = Types.NIL}
+        | A.IntExp num -> {exp = (Translate.intExp num); ty = Types.INT}
+        | A.StringExp (str, _) -> {exp = (Translate.stringExp str); ty = Types.STRING}
         | A.CallExp {func; args; pos} -> begin
             let sym_opt = Symbol.look venv func in if sym_opt = None then 
                 let _ = Errormsg.error pos ("function/procedure \"" ^ (Symbol.name func) ^ "\" is not declared in this scope") in
-                {exp = (); ty = Types.UNDEFINED}
+                {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
             else match Option.get sym_opt with
                 | Env.VarEntry _ -> let _ = Errormsg.error pos ("\"" ^ (Symbol.name func) ^ "\" is not a function/procedure") in
-                    {exp = (); ty = Types.UNDEFINED}
-                | Env.FunEntry {formals; result; _} ->
+                    {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
+                | Env.FunEntry {formals; result; level; label} ->
                 let len_params = List.length formals in
                 let len_args = List.length args in
                 let typ = match result with Types.UNIT -> "procedure" | _ -> "function" in
                 if len_params <> len_args then
                     let _ = Errormsg.error pos (typ ^ " expects " ^ (string_of_int len_params) ^ " arguments but got " ^ (string_of_int len_args)) in
-                        {exp = (); ty = result}
-                else 
+                        {exp = Translate.dummy_exp; ty = result}
+                else
                     let buildMessage num expected received = "argument " ^ num ^ " must be " ^ expected ^ ", but received " ^ received in
-                    let rec checkArgs i = function
-                        | (param :: pt, arg' :: at) -> let arg = (trExp arg')
+                    let rec checkAndReturnArgs i = function
+                        | (param :: pt, arg' :: at) -> let arg = (trExp breakable arg')
                                 in compare_types param arg pos buildMessage (string_of_int i);
-                                   checkArgs (i+1) (pt, at)
-                        | _ -> ()
-                    in let _ = checkArgs 1 (formals, args) in {exp = (); ty = result}
+                                   arg.exp :: (checkAndReturnArgs (i+1) (pt, at))
+                            | _ -> []
+                    in let args = checkAndReturnArgs 1 (formals, args) in
+                        {exp = Translate.callExp args level label; ty = result}
             end
         | A.OpExp {left; oper; right; pos} -> begin
             match oper with
-                | A.PlusOp | A.MinusOp | A.TimesOp | A.DivideOp
-                    -> let _, _ = (checkInt (trExp left) pos), (checkInt (trExp right) pos) in
-                        {exp = (); ty = Types.INT}
+                | A.PlusOp | A.MinusOp | A.TimesOp | A.DivideOp ->
+                    let (l, r) = ((trExp breakable left), (trExp breakable right)) in
+                    let _, _ = (checkInt l pos), (checkInt r pos) in
+                        {exp = (Translate.arith l.exp r.exp (Translate.operArith oper)); ty = Types.INT}
                 | A.GeOp | A.LeOp | A.GtOp | A.LtOp
-                    -> let l, r = (trExp left), (trExp right) in
-                        if l.ty = Types.INT then let _ = checkInt r pos in {exp = (); ty = Types.INT} else
-                        if l.ty = Types.STRING then let _ = checkString r pos in {exp = (); ty = Types.INT} else
-                        let _ = Errormsg.error pos "integer or string required" in {exp = (); ty = Types.INT}
+                    -> let l, r = (trExp breakable left), (trExp breakable right) in
+                        if l.ty = Types.INT then let _ = checkInt r pos in
+                                  {exp = (Translate.comp l.exp r.exp (Translate.operComp oper)); ty = Types.INT} else
+                        if l.ty = Types.STRING then let _ = checkString r pos in
+                                  {exp = (Translate.stringComp l.exp r.exp (Translate.operComp oper)); ty = Types.INT} else
+                        let _ = Errormsg.error pos "integer or string required" in {exp = Translate.dummy_exp; ty = Types.INT}
                 | A.EqOp | A.NeqOp
-                    -> let (l, r) = (trExp left), (trExp right) in
+                    -> let (l, r) = (trExp breakable left), (trExp breakable right) in
                         match actual_ty l.ty with
-                          | Types.UNDEFINED -> (*It has its own error message*) {exp = (); ty = Types.INT}
-                          | Types.INT -> let _ = checkInt r pos in {exp = (); ty = Types.INT}
-                          | Types.STRING -> let _ = checkString r pos in {exp = (); ty = Types.INT}
-                          | Types.RECORD (_, name, u) -> let _ = checkRecordOrNil ~message:(name ^ " record required") u r pos in {exp = (); ty = Types.INT}
-                          | Types.ARRAY (_, name, u) -> let _ = checkArray ~message:(name ^ " array required") u r pos in {exp = (); ty = Types.INT}
-                          | Types.NIL -> let _ = checkRecord r pos in {exp = (); ty = Types.INT}
-                          | _ -> let _ = Errormsg.error pos "valueful expression required" in {exp = (); ty = Types.INT}
+                          | Types.UNDEFINED -> (*It has its own error message*) {exp = Translate.dummy_exp; ty = Types.INT}
+                          | Types.INT -> let _ = checkInt r pos in 
+                                  {exp = (Translate.comp l.exp r.exp (Translate.operComp oper)); ty = Types.INT}
+                          | Types.STRING -> let _ = checkString r pos in
+                                  {exp = (Translate.stringComp l.exp r.exp (Translate.operComp oper)); ty = Types.INT}
+                          | Types.RECORD (_, name, u) -> let _ = checkRecordOrNil ~message:(name ^ " record required") u r pos in
+                                  {exp = (Translate.comp l.exp r.exp (Translate.operComp oper)); ty = Types.INT}
+                          | Types.ARRAY (_, name, u) -> let _ = checkArray ~message:(name ^ " array required") u r pos in
+                                  {exp = (Translate.comp l.exp r.exp (Translate.operComp oper)); ty = Types.INT}
+                          | Types.NIL -> let _ = checkRecord r pos in
+                                  {exp = (Translate.comp l.exp r.exp (Translate.operComp oper)); ty = Types.INT}
+                          | _ -> let _ = Errormsg.error pos "valueful expression required" in {exp = Translate.dummy_exp; ty = Types.INT}
             end
         | A.RecordExp {fields; typ; pos} -> begin
             let sym_opt = Symbol.look tenv typ in if sym_opt = None then
                 let _ = Errormsg.error pos ("record type \"" ^ (Symbol.name typ) ^ "\" is not declared in this scope") in
-                {exp = (); ty = Types.UNDEFINED}
+                {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
             else let record = Option.get sym_opt in match actual_ty record with
-                | Types.RECORD (the_fields, _, _) -> let _ = checkFields the_fields fields pos in
-                        {exp = (); ty = record}
+                | Types.RECORD (the_fields, _, _) ->
+                        let exprs = checkAndOrderFields the_fields fields pos in
+                        let exprs = List.map (fun x -> x.exp) exprs in
+                        {exp = Translate.recordExp exprs; ty = record}
                 | _ -> let _ = Errormsg.error pos ("\"" ^ (Symbol.name typ) ^ "\" is not a record type") in
-                        {exp = (); ty = Types.UNDEFINED}
+                        {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
         end
-        | A.SeqExp (lst, pos) -> let rec iter nth = function
-            | [] -> {exp = (); ty = Types.UNIT}
-            | [h] -> trExp ~breakable:breakable h
-            | h :: t -> let _ = errorIfName (trExp ~breakable:breakable h) pos
-                        in iter (nth+1) t
-            in iter 1 lst
-        | A.AssignExp {var; expr; pos} -> let {ty; _} = (transVar ~must_be_mutable:true var) in
+        | A.SeqExp (lst, _) -> let rec iter = function
+            | [] -> [], {exp=Translate.unitExp(); ty=Types.UNIT}
+            | [h] -> [], (trExp breakable h)
+            | h :: t -> let exp_expty = trExp breakable h in
+                        let (rest, last) = iter t in
+                            (exp_expty.exp :: rest), last
+            in let prev_exp, last_expty = iter lst
+            in {exp = Translate.seqExp prev_exp last_expty.exp; ty = last_expty.ty}
+        | A.AssignExp {var; expr; pos} ->
+            let var_expty = transVar ~must_be_mutable:true var in
+            let expr_expty = trExp breakable expr in
             let buildMessage _ expected received = "the assigned value must be " ^ expected ^ ", but received " ^ received in
-            let _ = compare_types ty (trExp expr) pos buildMessage "" in {exp = (); ty = Types.UNIT}
+            let _ = compare_types var_expty.ty expr_expty pos buildMessage "" in
+                {exp = Translate.assignExp var_expty.exp expr_expty.exp; ty = Types.UNIT}
         | A.IfExp {test; then'; else'; pos} ->
-            let _ = checkInt (trExp test) pos ~message:"test condition must be an integer" in
+            let test_expty = (trExp breakable test) in
+            let _ = checkInt test_expty pos ~message:"test condition must be an integer" in
             begin match else' with
-                | None -> let _ = checkUnit (trExp ~breakable:breakable then') pos ~message:"\"then\" clause must be unit (no \"else\" clause)" in
-                          {exp = (); ty = Types.UNIT}
-                | Some els -> let {ty; _} = (trExp ~breakable:breakable then') in
+                | None -> let then_expty =  (trExp breakable then') in
+                          let _ = checkUnit then_expty pos ~message:"\"then\" clause must be unit (no \"else\" clause)" in
+                          {exp = Translate.ifExp test_expty.exp then_expty.exp None; ty = Types.UNIT}
+                | Some els -> let then_expty = (trExp breakable then') in
+                              let else_expty = (trExp breakable els) in
                               let buildMessage _ expected received = "\"else\" clause's type must match \"then\" clause's type of " ^ expected ^ ", but received " ^ received in
-                              let _ = compare_types ty (trExp ~breakable:breakable els) pos buildMessage "" in
-                              {exp = (); ty = ty}
+                              let _ = compare_types then_expty.ty else_expty pos buildMessage "" in
+                              {exp = Translate.ifExp test_expty.exp then_expty.exp (Some else_expty.exp); ty = then_expty.ty}
             end
-        | A.WhileExp {test; body; pos} -> 
-            let _ = checkInt (trExp test) pos ~message:"test condition must be an integer" in
-            let _ = checkUnit (trExp ~breakable:true body) pos ~message:"body must be a valueless expression" in
-            {exp = (); ty = Types.UNIT}
+        | A.WhileExp {test; body; pos} ->
+            let done_label = Temp.newLabel() in
+            let test_expty = trExp breakable test in
+            let body_expty = trExp done_label body in
+            let _ = checkInt test_expty pos ~message:"test condition must be an integer" in
+            let _ = checkUnit body_expty pos ~message:"body must be a valueless expression" in
+            {exp = Translate.whileExp test_expty.exp body_expty.exp done_label; ty = Types.UNIT}
         | A.ForExp {var; escape; lo; hi; body; pos;} -> 
-            let _ = checkInt (trExp lo) pos ~message:"lower bound must be an integer" in
-            let _ = checkInt (trExp hi) pos ~message:"upper bound must be an integer" in
+            let done_label = Temp.newLabel() in
+            let lo_expty = trExp breakable lo in
+            let hi_expty = trExp breakable hi in
+            let _ = checkInt lo_expty pos ~message:"lower bound must be an integer" in
+            let _ = checkInt hi_expty pos ~message:"upper bound must be an integer" in
 
-            let data:Translate.data_formal = {escape = !escape; elementary = true} in
-            let _ = checkUnit
+            let i_access = Translate.allocLocal l !escape in
+            let body_expty = 
                         (transExp
-                            ~breakable:true
+                            done_label
                             (Symbol.enter venv var
                                 (Env.VarEntry {ty = Types.INT;
                                                immutable = true;
-                                               access = (Translate.allocLocal l data)}))
-                            tenv body l)
-                        pos
-                        ~message:"body must be a valueless expression" in
-            {exp = (); ty = Types.UNIT}
-        | A.BreakExp pos -> let _ = if not breakable then Errormsg.error pos "\"break\" is illegal here" in
-                            {exp = (); ty = Types.UNIT}
-        | A.LetExp {decs; body; _} -> let (venv', tenv') = transDecs venv tenv decs l in
+                                               access = i_access}))
+                            tenv body l) in
+            let _ = checkUnit body_expty pos ~message:"body must be a valueless expression" in
+            {exp = Translate.forExp lo_expty.exp hi_expty.exp body_expty.exp i_access done_label; ty = Types.UNIT}
+        | A.BreakExp pos -> let _ = if breakable = not_breakable then Errormsg.error pos "\"break\" is illegal here" in
+                            {exp = Translate.breakExp breakable; ty = Types.UNIT}
+        | A.LetExp {decs; body; _} ->
+            let (venv', tenv', exps) = transDecs breakable venv tenv decs l ~exps:[] in
             (*let _ = print_tenv ~verbose:true tenv' in*)
             (*let _ = print_venv venv' in*)
-            transExp ~breakable:breakable venv' tenv' body l
+            let body_expty = transExp breakable venv' tenv' body l in
+            {exp=Translate.letExp exps body_expty.exp; ty = body_expty.ty}
         | A.ArrayExp {typ; size; init; pos} -> begin
             let sym_opt = Symbol.look tenv typ in if sym_opt = None then
                 let _ = Errormsg.error pos ("array type \"" ^ (Symbol.name typ) ^ "\" is not declared in this scope") in
-                {exp = (); ty = Types.UNDEFINED}
+                {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
             else let arr = Option.get sym_opt in match arr with
                 | Types.ARRAY (elem_type, _, _) ->
-                    let _ = checkInt (trExp size) pos ~message:"array size must be an integer" in
+                    let size_expty = trExp breakable size in
+                    let _ = checkInt size_expty pos ~message:"array size must be an integer" in
                     let buildMessage _ expected received = "initializer type must be " ^ expected ^ ", but received " ^ received in
-                    let _ = compare_types elem_type (trExp init) pos buildMessage "" in
-                    {exp = (); ty = arr}
+                    let init_expty = trExp breakable init in
+                    let copy_semantics = not (Types.is_elementary init_expty.ty) in
+                    let _ = compare_types elem_type init_expty pos buildMessage "" in
+                    {exp = Translate.arrayExp size_expty.exp init_expty.exp copy_semantics; ty = arr}
                 | _ -> let _ = Errormsg.error pos ("\"" ^ (Symbol.name typ) ^ "\" is not a array type") in
-                        {exp = (); ty = Types.UNDEFINED}
+                        {exp = Translate.dummy_exp; ty = Types.UNDEFINED}
         end
 
-    in trExp ~breakable:breakable exp 
+    in trExp breakable exp 
 
-and transDecs venv tenv decs (l:Translate.level) = match decs with
-    | [] -> (venv, tenv)
+and transDecs ~(exps:Translate.exp list) breakable venv tenv decs (l:Translate.level) = match decs with
+    | [] -> (venv, tenv, List.rev exps)
     (*A VarDec can overwrite a previous VarDec with the same name*)
     | A.VarDec {name; escape; typ; init; pos; _} :: t ->
-        let init_expty = (transExp venv tenv init l) in
-        let {ty = init_ty;_} = init_expty in
+        let init_expty = (transExp breakable venv tenv init l) in
         begin match typ with
-        | None -> if init_ty = Types.NIL
+        | None -> if init_expty.ty = Types.NIL
                 then let _ = Errormsg.error pos "\"nil\" initiliazer requires declaration with explicit record type" in
-                    transDecs (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false; access = Translate.dummy_access})) tenv t l
+                    transDecs breakable (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false; access = Translate.dummy_access}))
+                              tenv t l ~exps:exps
                 else
-                    let data:Translate.data_formal = {escape= !escape; elementary=Types.is_elementary init_ty} in
-                    transDecs (Symbol.enter venv name
-                            (Env.VarEntry {ty=init_ty; immutable=false; access=Translate.allocLocal l data})) tenv t l
+                    let access = Translate.allocLocal l !escape in
+                    transDecs breakable (Symbol.enter venv name (Env.VarEntry {ty=init_expty.ty; immutable=false; access=access}))
+                            tenv t l ~exps:((Translate.varDec access init_expty.exp)::exps)
         | Some (sym, sym_pos) -> begin match Symbol.look tenv sym with
             | None -> let _ = Errormsg.error sym_pos ("type \"" ^ (Symbol.name sym) ^ "\" is not declared in this scope") in
-                    transDecs (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false; access = Translate.dummy_access})) tenv t l
+                    transDecs breakable (Symbol.enter venv name (Env.VarEntry {ty = Types.UNDEFINED; immutable = false; access = Translate.dummy_access}))
+                        tenv t l ~exps:exps
             | Some actual_type -> 
                 let buildMessage _ expected received = "initializer type must be " ^ expected ^ ", but received " ^ received in
                 let _ = compare_types actual_type init_expty sym_pos buildMessage "" in
-                let data:Translate.data_formal = {escape= !escape; elementary=Types.is_elementary actual_type} in
-                transDecs (Symbol.enter venv name (Env.VarEntry {ty=actual_type; immutable=false; access=Translate.allocLocal l data})) tenv t l
+                let access = Translate.allocLocal l !escape in
+                transDecs breakable (Symbol.enter venv name (Env.VarEntry {ty=actual_type; immutable=false; access=access}))
+                        tenv t l ~exps:((Translate.varDec access init_expty.exp)::exps)
             end
         end
     | (A.FunctionDec lst) :: t ->
@@ -359,11 +400,10 @@ and transDecs venv tenv decs (l:Translate.level) = match decs with
                         | Some ty -> ty
                         end
                     end
-                in let arg_data = List.map (fun (ty, esc) -> ({escape=esc;elementary=Types.is_elementary ty}:Translate.data_formal))
-                                                        (List.combine params_ty params_esc)
+
                 in let label = Temp.newLabel()
                 in let args:Translate.newLevelArgs = {parent=l;name=label;
-                                                      needs_static_link= !static_link;formals=arg_data}
+                                                      needs_static_link= !static_link;formals=params_esc}
                 in let level = Translate.newLevel args in
                 scan_headers
                     ~venv:(Symbol.enter venv name
@@ -374,8 +414,8 @@ and transDecs venv tenv decs (l:Translate.level) = match decs with
         in let lst = filter_duplicates lst
         in let (new_venv, data) = scan_headers lst (*we assume data is in the same order*)
 
-        in let rec scan_bodies (fundecs:A.fundec list) data = match fundecs with
-            | [] -> ()
+        in let rec scan_bodies (fundecs:A.fundec list) data (exps:Translate.exp list) = match fundecs with
+            | [] -> exps
             | {body;pos;_} :: t ->
                 let (params, result, new_level) = (List.hd data) in
                 let in_venv = List.fold_left
@@ -386,10 +426,11 @@ and transDecs venv tenv decs (l:Translate.level) = match decs with
                     (* big assumption everything is in the right order! :) *)
                     (List.combine params (Translate.formals new_level))
                 in let buildMessage _ expected received = "body must be " ^ expected ^ ", but received " ^ received
-                in compare_types result (transExp in_venv tenv body new_level) pos buildMessage "";
-                   scan_bodies t (List.tl data)
+                in let body_expty = (transExp not_breakable in_venv tenv body new_level)
+                in compare_types result body_expty pos buildMessage "";
+                   scan_bodies t (List.tl data) ((Translate.funDec body_expty.exp new_level)::exps)
 
-        in let _ = scan_bodies lst data in transDecs new_venv tenv t l
+        in let new_exps = scan_bodies lst data exps in transDecs breakable new_venv tenv t l ~exps:new_exps
 
     | (A.TypeDec lst) :: t ->
         let rec filter_duplicates ?(seen=[]) lst = match lst with
@@ -541,7 +582,7 @@ and transDecs venv tenv decs (l:Translate.level) = match decs with
 
         (* actual resolving finally*)
         in let final_tenv = resolveEverything tweaked_tenv lst
-        in transDecs venv final_tenv t l
+        in transDecs breakable venv final_tenv t l ~exps:exps
 
 and transTy ?(type_name="The developer forgor something") tenv ty  = match ty with
     | A.NameTy (sym, pos) -> begin match Symbol.look tenv sym with
@@ -559,4 +600,4 @@ and transTy ?(type_name="The developer forgor something") tenv ty  = match ty wi
 
 let transProg expr = 
     let () = FindEscape.findEscape expr in
-    (transExp Env.base_venv Env.base_tenv expr (Translate.outermost))
+    (transExp not_breakable Env.base_venv Env.base_tenv expr (Translate.outermost))

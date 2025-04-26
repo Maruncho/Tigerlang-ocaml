@@ -134,7 +134,8 @@ conditional:
 valueless:
   | lvalue ASSIGN expr                 {A.AssignExp {var = $1; expr = $3; pos = $2}}
   | WHILE expr DO expr                 {A.WhileExp {test = $2; body = $4; pos = $1}}
-  | FOR ID ASSIGN expr TO expr DO expr {A.ForExp{var=(S.symbol (fst $2));lo=$4;hi=$6;body=$8;pos=$1;escape=ref true}}
+  | FOR ID ASSIGN expr TO expr DO expr {A.ForExp{var=(S.symbol (fst $2));lo=$4;hi=$6;body=$8;pos=$1;escape=ref false}}
+
   | BREAK                              {A.BreakExp $1}
 ;
 
@@ -178,14 +179,14 @@ tyfields:
 ;
 tyfields_seq:
     ID COLON ID COMMA tyfields_seq
-            { let r : A.field = {name = (S.symbol (fst $1)); typ = (S.symbol (fst $3)); pos = $2; escape = ref true} in [r] @ $5 }
+            { let r : A.field = {name = (S.symbol (fst $1)); typ = (S.symbol (fst $3)); pos = $2; escape = ref false} in [r] @ $5 }
   | ID COLON ID
-            { let r : A.field = {name = (S.symbol (fst $1)); typ = (S.symbol (fst $3)); pos = $2; escape = ref true} in [r] }
+            { let r : A.field = {name = (S.symbol (fst $1)); typ = (S.symbol (fst $3)); pos = $2; escape = ref false} in [r] }
 ;
 
 vardec:
-    VAR ID ASSIGN expr          {A.VarDec{name=(S.symbol (fst $2));typ=None;init=$4;pos=$1;escape=ref true}}
-  | VAR ID COLON ID ASSIGN expr {A.VarDec{name=(S.symbol (fst $2));typ=Some((S.symbol (fst $4)),$3);init=$6;pos=$1;escape=ref true}}
+    VAR ID ASSIGN expr          {A.VarDec{name=(S.symbol (fst $2));typ=None;init=$4;pos=$1;escape=ref false}}
+  | VAR ID COLON ID ASSIGN expr {A.VarDec{name=(S.symbol (fst $2));typ=Some((S.symbol (fst $4)),$3);init=$6;pos=$1;escape=ref false}}
 ;
 
 fundecs: fundec { [$1] }
